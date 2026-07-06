@@ -1,0 +1,5 @@
+Tender ID,Title,Client,Amount,Status,Publish Date,Deadline,Department
+TND-2026-001,"Infrastructure Development Project","Ministry of Works",₹5.2 Cr,active,2026-05-10,2026-07-15,Public Works
+TND-2026-012,"Software Development Contract","Tech Solutions Inc",₹1.5 Cr,pending,2026-05-12,2026-06-30,IT Department
+TND-2026-008,"Construction Services","Real Estate Corp",₹3.8 Cr,active,2026-05-05,2026-08-10,Urban Planning
+TND-2026-022,"Consulting Services","Financial Advisors Ltd",₹75 Lakh,completed,2026-04-20,2026-05-20,Finance

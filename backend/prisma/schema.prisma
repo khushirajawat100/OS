@@ -1,0 +1,102 @@
+datasource db {
+  provider = "postgresql"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Founder {
+  id          String   @id @default(uuid())
+  email       String   @unique
+  password    String
+  name        String
+  role        String   @default("Founder")
+  companyName String   @default("OS")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  chats       Chat[]
+  settings    Settings?
+}
+
+model Executive {
+  id           String   @id
+  name         String
+  role         String
+  icon         String
+  avatar       String
+  description  String
+  themeColor   String
+  accentColor  String
+  status       String
+  department   String
+  systemPrompt String
+  futureTools  String[]
+  model        String
+  chats        Chat[]
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model Chat {
+  id          String    @id @default(uuid())
+  executiveId String
+  executive   Executive @relation(fields: [executiveId], references: [id], onDelete: Cascade)
+  founderId   String
+  founder     Founder   @relation(fields: [founderId], references: [id], onDelete: Cascade)
+  messages    Message[]
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@unique([founderId, executiveId])
+}
+
+model Message {
+  id        String   @id @default(uuid())
+  chatId    String
+  chat      Chat     @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  sender    String   // 'founder' | 'executive'
+  text      String
+  timestamp String
+  createdAt DateTime @default(now())
+}
+
+model Project {
+  id        String   @id @default(uuid())
+  title     String
+  dept      String
+  owner     String
+  level     String   // 'High' | 'Medium' | 'Low'
+  column    String   // 'Backlog' | 'In Progress' | 'In Review' | 'Done'
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Report {
+  id        String   @id @default(uuid())
+  name      String
+  size      String
+  compiled  String
+  author    String
+  type      String   // 'sheet' | 'code' | 'text'
+  createdAt DateTime @default(now())
+}
+
+model Settings {
+  id                String   @id @default(uuid())
+  founderId         String   @unique
+  founder           Founder  @relation(fields: [founderId], references: [id], onDelete: Cascade)
+  geminiKey         String?
+  anthropicKey      String?
+  globalTemperature Float    @default(0.25)
+  creativeScale     Float    @default(0.70)
+  updatedAt         DateTime @updatedAt
+}
+
+model CompanyBrain {
+  key       String   @id
+  value     String   @db.Text
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
