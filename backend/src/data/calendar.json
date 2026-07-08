@@ -1,76 +1,5 @@
 {
-  "29": [
-    {
-      "time": "09:00 AM",
-      "title": "Weekly Alignment Briefing",
-      "lead": "CEO",
-      "type": "Strategy",
-      "status": "completed"
-    },
-    {
-      "time": "11:30 AM",
-      "title": "Ad Campaign Budget Assessment",
-      "lead": "CMO",
-      "type": "Marketing",
-      "status": "completed"
-    },
-    {
-      "time": "03:00 PM",
-      "title": "SaaS Agreement Terms Audit",
-      "lead": "LEGAL",
-      "type": "Compliance",
-      "status": "completed"
-    }
-  ],
-  "30": [
-    {
-      "time": "10:00 AM",
-      "title": "Docker Container Re-indexing",
-      "lead": "CTO",
-      "type": "DevOps",
-      "status": "completed"
-    },
-    {
-      "time": "02:30 PM",
-      "title": "Operational Automation Audit",
-      "lead": "COO",
-      "type": "Operations",
-      "status": "completed"
-    }
-  ],
-  "01": [
-    {
-      "time": "09:00 AM",
-      "title": "Corporate Treasury Allocation",
-      "lead": "CFO",
-      "type": "Finance",
-      "status": "completed"
-    },
-    {
-      "time": "04:00 PM",
-      "title": "Social Reach Keywords Sync",
-      "lead": "CMO",
-      "type": "Marketing",
-      "status": "completed"
-    }
-  ],
-  "02": [
-    {
-      "time": "11:00 AM",
-      "title": "Database log index compaction",
-      "lead": "CTO",
-      "type": "Engineering",
-      "status": "completed"
-    },
-    {
-      "time": "03:30 PM",
-      "title": "IP Application Submission",
-      "lead": "LEGAL",
-      "type": "Compliance",
-      "status": "completed"
-    }
-  ],
-  "03": [
+  "10": [
     {
       "time": "10:30 AM",
       "title": "Runway Projection Calculation",
@@ -86,7 +15,7 @@
       "status": "completed"
     }
   ],
-  "04": [
+  "11": [
     {
       "time": "09:00 AM",
       "title": "C-Suite Strategic Sync",
@@ -123,7 +52,7 @@
       "status": "upcoming"
     }
   ],
-  "05": [
+  "12": [
     {
       "time": "12:00 PM",
       "title": "System Security Log Rotations",
@@ -137,6 +66,77 @@
       "lead": "COO",
       "type": "Operations",
       "status": "upcoming"
+    }
+  ],
+  "06": [
+    {
+      "time": "09:00 AM",
+      "title": "Weekly Alignment Briefing",
+      "lead": "CEO",
+      "type": "Strategy",
+      "status": "completed"
+    },
+    {
+      "time": "11:30 AM",
+      "title": "Ad Campaign Budget Assessment",
+      "lead": "CMO",
+      "type": "Marketing",
+      "status": "completed"
+    },
+    {
+      "time": "03:00 PM",
+      "title": "SaaS Agreement Terms Audit",
+      "lead": "LEGAL",
+      "type": "Compliance",
+      "status": "completed"
+    }
+  ],
+  "07": [
+    {
+      "time": "10:00 AM",
+      "title": "Docker Container Re-indexing",
+      "lead": "CTO",
+      "type": "DevOps",
+      "status": "completed"
+    },
+    {
+      "time": "02:30 PM",
+      "title": "Operational Automation Audit",
+      "lead": "COO",
+      "type": "Operations",
+      "status": "completed"
+    }
+  ],
+  "08": [
+    {
+      "time": "09:00 AM",
+      "title": "Corporate Treasury Allocation",
+      "lead": "CFO",
+      "type": "Finance",
+      "status": "completed"
+    },
+    {
+      "time": "04:00 PM",
+      "title": "Social Reach Keywords Sync",
+      "lead": "CMO",
+      "type": "Marketing",
+      "status": "completed"
+    }
+  ],
+  "09": [
+    {
+      "time": "11:00 AM",
+      "title": "Database log index compaction",
+      "lead": "CTO",
+      "type": "Engineering",
+      "status": "completed"
+    },
+    {
+      "time": "03:30 PM",
+      "title": "IP Application Submission",
+      "lead": "LEGAL",
+      "type": "Compliance",
+      "status": "completed"
     }
   ]
 }

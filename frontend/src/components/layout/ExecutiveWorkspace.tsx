@@ -12,10 +12,22 @@ import {
   Trash2,
   Loader2,
   Clock,
-  Paperclip
+  Paperclip,
+  Mic,
+  MicOff,
+  Volume2,
+  VolumeX,
+  Phone,
+  PhoneOff
 } from 'lucide-react';
 import { getExecutiveMap } from '@/config/executives';
 import { API_BASE_URL } from '@/config/api';
+
+const SpeechRecognitionAPI = typeof window !== 'undefined' 
+  ? ((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition) 
+  : null;
+
+const isSTTSupported = !!SpeechRecognitionAPI;
 
 interface Message {
   id: string;
@@ -343,6 +355,530 @@ export const ExecutiveWorkspace: React.FC = () => {
   const [scheduleTime, setScheduleTime] = useState('02:00 PM');
   const [successScheduledId, setSuccessScheduledId] = useState<string | number | null>(null);
 
+  // Speech Synthesis & Recognition States & Refs
+  const [speakingMessageId, setSpeakingMessageId] = useState<string | null>(null);
+  const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
+  const [isRecording, setIsRecording] = useState(false);
+  const [wakeWordListening, setWakeWordListening] = useState(false);
+  const [speechLanguage, setSpeechLanguage] = useState<'en' | 'hi'>('en');
+  const [liveTalkActive, setLiveTalkActive] = useState(false);
+
+  const recognitionRef = useRef<any>(null);
+  const wakeWordRecognitionRef = useRef<any>(null);
+  const isRecordingRef = useRef(false);
+  const wakeWordListeningRef = useRef(false);
+  const speechLanguageRef = useRef<'en' | 'hi'>('en');
+  const liveTalkActiveRef = useRef(false);
+  const transcribedTextRef = useRef('');
+
+  // Sync ref values with state changes
+  useEffect(() => {
+    isRecordingRef.current = isRecording;
+  }, [isRecording]);
+
+  useEffect(() => {
+    wakeWordListeningRef.current = wakeWordListening;
+  }, [wakeWordListening]);
+
+  useEffect(() => {
+    liveTalkActiveRef.current = liveTalkActive;
+  }, [liveTalkActive]);
+
+  // Handle language switch
+  useEffect(() => {
+    speechLanguageRef.current = speechLanguage;
+    localStorage.setItem('heyOsLanguage', speechLanguage);
+    if (wakeWordListeningRef.current) {
+      startWakeWordListening();
+    }
+  }, [speechLanguage]);
+
+  // Load voices and restore settings on mount
+  useEffect(() => {
+    if (typeof window !== 'undefined' && window.speechSynthesis) {
+      window.speechSynthesis.getVoices();
+    }
+
+    const savedWakeWord = localStorage.getItem('heyOsWakeWordActive') === 'true';
+    const savedLanguage = localStorage.getItem('heyOsLanguage') as 'en' | 'hi' || 'en';
+    setSpeechLanguage(savedLanguage);
+    speechLanguageRef.current = savedLanguage;
+
+    if (savedWakeWord && SpeechRecognitionAPI) {
+      const startListening = () => {
+        setWakeWordListening(true);
+        wakeWordListeningRef.current = true;
+        startWakeWordListening();
+        window.removeEventListener('click', startListening);
+        window.removeEventListener('keydown', startListening);
+      };
+
+      try {
+        setWakeWordListening(true);
+        wakeWordListeningRef.current = true;
+        startWakeWordListening();
+      } catch (e) {
+        window.addEventListener('click', startListening);
+        window.addEventListener('keydown', startListening);
+      }
+    }
+
+    return () => {
+      if (typeof window !== 'undefined' && window.speechSynthesis) {
+        window.speechSynthesis.cancel();
+      }
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
+      }
+      if (wakeWordRecognitionRef.current) {
+        wakeWordRecognitionRef.current.abort();
+      }
+    };
+  }, []);
+
+  // Helper to strip markdown and prep text for speech
+  const cleanTextForSpeech = (text: string): string => {
+    let clean = text.replace(/!\[.*?\]\(.*?\)/g, '');
+    clean = clean.replace(/\[(.*?)\]\(.*?\)/g, '$1');
+    clean = clean.replace(/>\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]/gi, '');
+    clean = clean.replace(/📎\s*Forwarded Document:/gi, 'Forwarded document:');
+    clean = clean.replace(/📎\s*Generated Deliverable:/gi, 'Generated deliverable:');
+    clean = clean.replace(/[*_`#]/g, '');
+    clean = clean.replace(/<[^>]*>/g, '');
+    return clean.trim();
+  };
+
+  // Map role IDs to specific voice properties (pitch/rate) to give them individual character
+  const getVoiceParams = (roleId: string) => {
+    switch (roleId.toLowerCase()) {
+      case 'ceo':
+        return { pitch: 1.05, rate: 0.95 }; // Aria Vance: Clear, confident female voice
+      case 'coo':
+        return { pitch: 0.95, rate: 1.05 }; // Helix Sync: Efficient, quick male voice
+      case 'cto':
+        return { pitch: 1.1, rate: 1.1 };   // Byte Weaver: Analytical, slightly higher pitched/faster male voice
+      case 'cfo':
+        return { pitch: 0.9, rate: 0.95 };  // Ledger Vance: Steady, deep male voice
+      case 'cmo':
+        return { pitch: 1.15, rate: 1.05 }; // Nova Sparks: Energetic female voice
+      case 'legal':
+        return { pitch: 0.85, rate: 0.85 }; // Justice Code: Formal, slow, deep voice
+      default:
+        return { pitch: 1.0, rate: 1.0 };
+    }
+  };
+
+  // Match role IDs to female/male browser voices
+  const getVoiceForExecutive = (roleId: string): SpeechSynthesisVoice | null => {
+    if (typeof window === 'undefined' || !window.speechSynthesis) return null;
+    const voices = window.speechSynthesis.getVoices();
+    
+    // Hindi voice requested
+    if (speechLanguageRef.current === 'hi') {
+      const hindiVoices = voices.filter(v => v.lang.startsWith('hi') || v.name.toLowerCase().includes('hindi'));
+      if (hindiVoices.length > 0) return hindiVoices[0];
+    }
+
+    const langVoices = voices.filter(v => v.lang.startsWith('en'));
+    if (langVoices.length === 0) return null;
+
+    const femaleNames = ['female', 'zira', 'samantha', 'google us english', 'hazel', 'susan', 'en-us-x-sfg-local'];
+    const maleNames = ['male', 'david', 'mark', 'google uk english male', 'george', 'ravi', 'en-us-x-iom-local'];
+
+    const femaleVoices = langVoices.filter(v => 
+      femaleNames.some(name => v.name.toLowerCase().includes(name))
+    );
+    
+    const maleVoices = langVoices.filter(v => 
+      maleNames.some(name => v.name.toLowerCase().includes(name))
+    );
+
+    const id = roleId.toLowerCase();
+    if (id === 'ceo' || id === 'cmo') {
+      return femaleVoices.length > 0 ? femaleVoices[0] : langVoices[0];
+    } else if (id === 'coo' || id === 'cto' || id === 'cfo' || id === 'legal') {
+      return maleVoices.length > 0 ? maleVoices[0] : (langVoices[1] || langVoices[0]);
+    }
+    return langVoices[0];
+  };
+
+  const handlePlayTTS = (msgId: string, text: string, sender: string) => {
+    if (typeof window === 'undefined' || !window.speechSynthesis) return;
+
+    if (speakingMessageId === msgId) {
+      window.speechSynthesis.cancel();
+      setSpeakingMessageId(null);
+      return;
+    }
+
+    window.speechSynthesis.cancel();
+
+    const cleanText = cleanTextForSpeech(text);
+    const utterance = new SpeechSynthesisUtterance(cleanText);
+    utteranceRef.current = utterance;
+
+    const roleId = sender === 'founder' ? 'founder' : (exec?.id || 'executive');
+    const voice = getVoiceForExecutive(roleId);
+    if (voice) {
+      utterance.voice = voice;
+    }
+    
+    const { pitch, rate } = getVoiceParams(roleId);
+    utterance.pitch = pitch;
+    utterance.rate = rate;
+
+    utterance.onend = () => {
+      setSpeakingMessageId(null);
+    };
+    utterance.onerror = () => {
+      setSpeakingMessageId(null);
+    };
+
+    setSpeakingMessageId(msgId);
+    window.speechSynthesis.speak(utterance);
+  };
+
+  const startActiveDictation = () => {
+    if (!SpeechRecognitionAPI) return;
+    if (isRecordingRef.current) return;
+    
+    setIsRecording(true);
+    isRecordingRef.current = true;
+
+    try {
+      const recognition = new SpeechRecognitionAPI();
+      recognition.continuous = false;
+      recognition.interimResults = false;
+      recognition.lang = speechLanguageRef.current === 'en' ? 'en-US' : 'hi-IN';
+
+      recognition.onstart = () => {
+        setIsRecording(true);
+        isRecordingRef.current = true;
+      };
+
+      recognition.onresult = (event: any) => {
+        // BARGE-IN: If user speaks while executive is speaking, stop speaking immediately
+        if (typeof window !== 'undefined' && window.speechSynthesis && window.speechSynthesis.speaking) {
+          window.speechSynthesis.cancel();
+          setSpeakingMessageId(null);
+        }
+
+        const transcript = event.results[0][0].transcript;
+        if (transcript) {
+          transcribedTextRef.current = transcript;
+          setInputText(transcript);
+        }
+      };
+
+      recognition.onerror = (event: any) => {
+        if (event.error !== 'no-speech' && event.error !== 'aborted') {
+          console.error('Speech recognition error:', event.error, event.message);
+        }
+        setIsRecording(false);
+        isRecordingRef.current = false;
+      };
+
+      recognition.onend = () => {
+        setIsRecording(false);
+        isRecordingRef.current = false;
+        
+        if (liveTalkActiveRef.current) {
+          const textToSend = transcribedTextRef.current;
+          transcribedTextRef.current = '';
+          if (textToSend.trim()) {
+            setInputText(''); // Clear typing field
+            sendMessageText(textToSend); // Dispatch and save to chat history
+          } else {
+            // Silence timeout, restart listening loop
+            setTimeout(() => {
+              if (liveTalkActiveRef.current && !isRecordingRef.current) {
+                startActiveDictation();
+              }
+            }, 500);
+          }
+        } else if (wakeWordListeningRef.current) {
+          // Resume wake word listener if still toggled
+          setTimeout(() => {
+            if (wakeWordListeningRef.current && !isRecordingRef.current) {
+              startWakeWordListening();
+            }
+          }, 800);
+        }
+      };
+
+      recognitionRef.current = recognition;
+      recognition.start();
+    } catch (err) {
+      console.error('Failed to start speech recognition:', err);
+      setIsRecording(false);
+      isRecordingRef.current = false;
+    }
+  };
+
+  const startWakeWordListening = () => {
+    if (!SpeechRecognitionAPI) return;
+
+    if (wakeWordRecognitionRef.current) {
+      try {
+        wakeWordRecognitionRef.current.abort();
+      } catch (e) {}
+    }
+
+    try {
+      const rec = new SpeechRecognitionAPI();
+      rec.continuous = true;
+      rec.interimResults = true;
+      rec.lang = speechLanguageRef.current === 'en' ? 'en-US' : 'hi-IN';
+
+      rec.onresult = (event: any) => {
+        let transcript = '';
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          transcript += event.results[i][0].transcript.toLowerCase() + ' ';
+        }
+        transcript = transcript.trim();
+
+        // English variations (handling accent issues like 'hey boss', 'hey us', 'hey office', etc.)
+        const hasOs = transcript.includes('os') || transcript.includes('o s') || transcript.includes('us') || transcript.includes('aws') || transcript.includes('boss') || transcript.includes('house') || transcript.includes('office') || transcript.includes('horse') || transcript.includes('force');
+        const hasHey = transcript.includes('hey') || transcript.includes('hi') || transcript.includes('hello') || transcript.includes('hay') || transcript.includes('heyo') || transcript.includes('hai');
+
+        const matchesEn = (hasHey && hasOs) || 
+                          transcript.includes('hey os') || 
+                          transcript.includes('hay os') || 
+                          transcript.includes('hi os') || 
+                          transcript.includes('hello os') || 
+                          transcript.includes('hayos');
+                          
+        // Hindi variations
+        const matchesHi = transcript.includes('हे ओएस') || 
+                          transcript.includes('नमस्ते ओएस') || 
+                          transcript.includes('हेलो ओएस') || 
+                          transcript.includes('ओएस') || 
+                          transcript.includes('ओ एस') ||
+                          (transcript.includes('हे') && transcript.includes('ओ'));
+
+        if (matchesEn || matchesHi) {
+          rec.abort(); // Stop listening for wake word
+
+          // Trigger Live Talk
+          setLiveTalkActive(true);
+          liveTalkActiveRef.current = true;
+
+          // Parse and extract trailing command text
+          const stripWakeWordPrefix = (text: string): string => {
+            const lowercase = text.toLowerCase();
+            const prefixes = [
+              'hey os', 'hay os', 'hi os', 'hello os', 'k os', 'hayos', 'heyo s', 'heios',
+              'hey boss', 'hey us', 'hey office', 'hey aws', 'hey house', 'hey horse', 'hey force',
+              'he os', 'hai os', 'hao s', 'a os', 'eos',
+              'हे ओएस', 'नमस्ते ओएस', 'हेलो ओएस', 'ओएस', 'ओ एस'
+            ];
+            
+            for (const prefix of prefixes) {
+              if (lowercase.startsWith(prefix)) {
+                return text.substring(prefix.length).trim();
+              }
+            }
+            
+            const osKeywords = ['os', 'us', 'aws', 'boss', 'house', 'office', 'horse', 'force', 'ओएस', 'ओ एस'];
+            for (const keyword of osKeywords) {
+              const idx = lowercase.indexOf(keyword);
+              if (idx !== -1) {
+                return text.substring(idx + keyword.length).trim();
+              }
+            }
+            
+            return text;
+          };
+
+          const commandText = stripWakeWordPrefix(transcript);
+
+          if (commandText && commandText.length > 1) {
+            // Dispatch command immediately!
+            sendMessageText(commandText);
+          } else {
+            // Prompt the user for input and start listening
+            const confirmText = speechLanguageRef.current === 'en' ? 'Yes, Founder? Live session active.' : 'जी बोलिए, लाइव सत्र सक्रिय है।';
+
+            if (typeof window !== 'undefined' && window.speechSynthesis) {
+              window.speechSynthesis.cancel();
+              const utterance = new SpeechSynthesisUtterance(confirmText);
+              const roleId = exec?.id || 'ceo';
+              const voice = getVoiceForExecutive(roleId);
+              if (voice) utterance.voice = voice;
+              const { pitch, rate } = getVoiceParams(roleId);
+              utterance.pitch = pitch;
+              utterance.rate = rate;
+
+              utterance.onend = () => {
+                startActiveDictation();
+              };
+              utterance.onerror = () => {
+                startActiveDictation();
+              };
+
+              window.speechSynthesis.speak(utterance);
+            } else {
+              startActiveDictation();
+            }
+          }
+        }
+      };
+
+      rec.onerror = (event: any) => {
+        if (event.error === 'no-speech' || event.error === 'aborted') {
+          return;
+        }
+        console.warn('Wake word recognition error:', event.error);
+      };
+
+      rec.onend = () => {
+        if (wakeWordListeningRef.current && !isRecordingRef.current) {
+          setTimeout(() => {
+            if (wakeWordListeningRef.current && !isRecordingRef.current) {
+              startWakeWordListening();
+            }
+          }, 500);
+        }
+      };
+
+      wakeWordRecognitionRef.current = rec;
+      rec.start();
+    } catch (err) {
+      console.error('Failed to start wake word listener:', err);
+    }
+  };
+
+  const toggleSpeechRecognition = () => {
+    if (!SpeechRecognitionAPI) return;
+
+    if (isRecording) {
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
+      }
+      setIsRecording(false);
+      isRecordingRef.current = false;
+      return;
+    }
+
+    if (wakeWordListeningRef.current && wakeWordRecognitionRef.current) {
+      wakeWordRecognitionRef.current.abort();
+    }
+
+    startActiveDictation();
+  };
+
+  const toggleWakeWordListening = () => {
+    if (wakeWordListening) {
+      setWakeWordListening(false);
+      wakeWordListeningRef.current = false;
+      localStorage.setItem('heyOsWakeWordActive', 'false');
+      if (wakeWordRecognitionRef.current) {
+        wakeWordRecognitionRef.current.abort();
+      }
+    } else {
+      // Turn off normal recording or Live Talk
+      if (isRecording) {
+        if (recognitionRef.current) {
+          recognitionRef.current.abort();
+        }
+        setIsRecording(false);
+        isRecordingRef.current = false;
+      }
+      if (liveTalkActive) {
+        setLiveTalkActive(false);
+        liveTalkActiveRef.current = false;
+      }
+      setWakeWordListening(true);
+      wakeWordListeningRef.current = true;
+      localStorage.setItem('heyOsWakeWordActive', 'true');
+      startWakeWordListening();
+    }
+  };
+
+  const playTTSForLiveTalk = (msgId: string, text: string) => {
+    if (typeof window === 'undefined' || !window.speechSynthesis) return;
+
+    window.speechSynthesis.cancel();
+
+    const cleanText = cleanTextForSpeech(text);
+    const utterance = new SpeechSynthesisUtterance(cleanText);
+    utteranceRef.current = utterance;
+
+    const roleId = exec?.id || 'executive';
+    const voice = getVoiceForExecutive(roleId);
+    if (voice) {
+      utterance.voice = voice;
+    }
+    
+    const { pitch, rate } = getVoiceParams(roleId);
+    utterance.pitch = pitch;
+    utterance.rate = rate;
+
+    utterance.onend = () => {
+      setSpeakingMessageId(null);
+      if (liveTalkActiveRef.current) {
+        startActiveDictation();
+      }
+    };
+    utterance.onerror = () => {
+      setSpeakingMessageId(null);
+      if (liveTalkActiveRef.current) {
+        startActiveDictation();
+      }
+    };
+
+    setSpeakingMessageId(msgId);
+    window.speechSynthesis.speak(utterance);
+  };
+
+  const toggleLiveTalk = () => {
+    if (liveTalkActive) {
+      setLiveTalkActive(false);
+      liveTalkActiveRef.current = false;
+      if (typeof window !== 'undefined' && window.speechSynthesis) {
+        window.speechSynthesis.cancel();
+      }
+      if (recognitionRef.current) {
+        recognitionRef.current.abort();
+      }
+      setIsRecording(false);
+      isRecordingRef.current = false;
+    } else {
+      // Turn off wake word
+      if (wakeWordListening) {
+        setWakeWordListening(false);
+        wakeWordListeningRef.current = false;
+        if (wakeWordRecognitionRef.current) {
+          wakeWordRecognitionRef.current.abort();
+        }
+      }
+      
+      setLiveTalkActive(true);
+      liveTalkActiveRef.current = true;
+      
+      const confirmText = speechLanguage === 'en' ? 'Live session established.' : 'लाइव सत्र शुरू हो गया है।';
+      if (typeof window !== 'undefined' && window.speechSynthesis) {
+        window.speechSynthesis.cancel();
+        const utterance = new SpeechSynthesisUtterance(confirmText);
+        const roleId = exec?.id || 'ceo';
+        const voice = getVoiceForExecutive(roleId);
+        if (voice) utterance.voice = voice;
+        const { pitch, rate } = getVoiceParams(roleId);
+        utterance.pitch = pitch;
+        utterance.rate = rate;
+        utterance.onend = () => {
+          startActiveDictation();
+        };
+        utterance.onerror = () => {
+          startActiveDictation();
+        };
+        window.speechSynthesis.speak(utterance);
+      } else {
+        startActiveDictation();
+      }
+    }
+  };
+
   // Sync Chat Logs with Backend Database API
   const fetchChatHistory = async (silent = false) => {
     if (!exec) return;
@@ -509,6 +1045,20 @@ export const ExecutiveWorkspace: React.FC = () => {
   };
 
   useEffect(() => {
+    // Stop any ongoing speech synthesis, speech recognition, or wake word listening on route change
+    if (typeof window !== 'undefined' && window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+    }
+    setSpeakingMessageId(null);
+    if (recognitionRef.current) {
+      recognitionRef.current.stop();
+    }
+    setIsRecording(false);
+    if (wakeWordRecognitionRef.current) {
+      wakeWordRecognitionRef.current.abort();
+    }
+    setWakeWordListening(false);
+
     setMessages([]);
     fetchChatHistory(false);
     fetchCalendarEvents();
@@ -693,12 +1243,8 @@ export const ExecutiveWorkspace: React.FC = () => {
   };
 
   // Send message to Database API
-  const handleSend = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!inputText.trim()) return;
-
-    const messageText = inputText.trim();
-    setInputText('');
+  const sendMessageText = async (messageText: string) => {
+    if (!messageText.trim()) return;
     setIsTyping(true);
 
     try {
@@ -711,12 +1257,31 @@ export const ExecutiveWorkspace: React.FC = () => {
         const result = await res.json();
         appendMessages([result.userMessage, result.executiveMessage]);
         fetchCalendarEvents();
+
+        // If Live Talk is active, automatically read the executive response aloud!
+        if (liveTalkActiveRef.current && result.executiveMessage) {
+          playTTSForLiveTalk(result.executiveMessage.id, result.executiveMessage.text);
+          // Concurrently start listening so the user can barge-in/interrupt!
+          setTimeout(() => {
+            if (liveTalkActiveRef.current) {
+              startActiveDictation();
+            }
+          }, 300);
+        }
       }
     } catch (err) {
       console.error('Failed to submit message to backend', err);
     } finally {
       setIsTyping(false);
     }
+  };
+
+  const handleSend = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!inputText.trim()) return;
+    const text = inputText;
+    setInputText('');
+    await sendMessageText(text);
   };
 
   const triggerFileSelect = () => {
@@ -995,11 +1560,29 @@ export const ExecutiveWorkspace: React.FC = () => {
                     </div>
 
                     <div className="space-y-1 max-w-[75%]">
-                      <div className={`flex items-baseline space-x-2 ${msg.sender === 'founder' ? 'flex-row-reverse space-x-reverse' : ''}`}>
+                      <div className={`flex items-center space-x-2 ${msg.sender === 'founder' ? 'flex-row-reverse space-x-reverse' : ''}`}>
                         <span className="text-xs font-bold text-white uppercase tracking-wider font-mono">
                           {msg.sender === 'founder' ? 'Founder' : exec.id.toUpperCase()}
                         </span>
                         <span className="text-[9px] text-zinc-650 font-mono">{msg.timestamp}</span>
+                        {!msg.text.includes('📎') && (
+                          <button
+                            type="button"
+                            onClick={() => handlePlayTTS(msg.id, msg.text, msg.sender)}
+                            className={`p-1 rounded hover:bg-zinc-900 transition-colors cursor-pointer flex items-center justify-center ${
+                              speakingMessageId === msg.id 
+                                ? 'text-cyan-400' 
+                                : 'text-zinc-500 hover:text-zinc-300'
+                            }`}
+                            title={speakingMessageId === msg.id ? "Stop reading" : "Read aloud"}
+                          >
+                            {speakingMessageId === msg.id ? (
+                              <VolumeX className="h-3.5 w-3.5 animate-pulse" />
+                            ) : (
+                              <Volume2 className="h-3.5 w-3.5" />
+                            )}
+                          </button>
+                        )}
                       </div>
                       
                       {msg.text.includes('📎') ? (
@@ -1084,6 +1667,68 @@ export const ExecutiveWorkspace: React.FC = () => {
             >
               <Paperclip className="h-4 w-4" />
             </button>
+            {isSTTSupported && (
+              <div className="flex items-center space-x-1.5 shrink-0 bg-zinc-900 border border-zinc-850 p-1 rounded-lg">
+                <button
+                  type="button"
+                  onClick={toggleSpeechRecognition}
+                  className={`p-1.5 rounded transition-all duration-300 flex items-center justify-center cursor-pointer relative ${
+                    isRecording 
+                      ? 'bg-red-950/60 border border-red-500/40 text-red-400 animate-pulse shadow-[0_0_10px_rgba(239,68,68,0.2)] hover:bg-red-950/80 hover:text-red-300' 
+                      : 'text-zinc-400 hover:text-white hover:bg-zinc-800'
+                  }`}
+                  title={isRecording ? "Stop listening" : "Dictate message"}
+                >
+                  {isRecording ? <MicOff className="h-3.5 w-3.5" /> : <Mic className="h-3.5 w-3.5" />}
+                  {isRecording && (
+                    <span className="absolute -top-0.5 -right-0.5 flex h-1.5 w-1.5">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+                      <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-red-500"></span>
+                    </span>
+                  )}
+                </button>
+                
+                {/* Language Toggle */}
+                <button
+                  type="button"
+                  onClick={() => setSpeechLanguage(prev => prev === 'en' ? 'hi' : 'en')}
+                  className="px-1.5 py-0.5 bg-zinc-950 hover:bg-zinc-800 border border-zinc-800 rounded text-[9px] font-bold text-zinc-400 hover:text-white transition-colors cursor-pointer"
+                  title="Toggle speech language (English / Hindi)"
+                >
+                  {speechLanguage === 'en' ? 'EN' : 'HI'}
+                </button>
+
+                {/* Wake Word Selector */}
+                <button
+                  type="button"
+                  onClick={toggleWakeWordListening}
+                  className={`px-1.5 py-0.5 border rounded text-[9px] font-mono transition-all flex items-center space-x-1 cursor-pointer ${
+                    wakeWordListening 
+                      ? 'bg-cyan-950/60 border-cyan-800/40 text-cyan-400 animate-pulse' 
+                      : 'bg-zinc-950 border-zinc-800 hover:bg-zinc-800 text-zinc-500 hover:text-zinc-300'
+                  }`}
+                  title="Toggle 'Hey OS' wake word listener"
+                >
+                  <span className={`h-1 w-1 rounded-full ${wakeWordListening ? 'bg-cyan-400 animate-ping' : 'bg-zinc-650'}`} />
+                  <span>Hey OS</span>
+                </button>
+
+                {/* Live Talk Button */}
+                <button
+                  type="button"
+                  onClick={toggleLiveTalk}
+                  className={`px-1.5 py-0.5 border rounded text-[9px] font-mono transition-all flex items-center space-x-1 cursor-pointer ${
+                    liveTalkActive 
+                      ? 'bg-emerald-955/60 border-emerald-500/40 text-emerald-450 animate-pulse font-bold' 
+                      : 'bg-zinc-950 border-zinc-800 hover:bg-zinc-800 text-zinc-500 hover:text-zinc-300'
+                  }`}
+                  title="Toggle continuous Live Voice session"
+                >
+                  {liveTalkActive ? <PhoneOff className="h-2.5 w-2.5" /> : <Phone className="h-2.5 w-2.5" />}
+                  <span>Live Talk</span>
+                </button>
+              </div>
+            )}
             <input
               type="text"
               value={inputText}

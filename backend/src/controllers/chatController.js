@@ -2,10 +2,15 @@ import { prisma } from '../config/db.js';
 import { addCalendarEventInternal } from './calendarController.js';
 import fs from 'fs';
 import path from 'path';
+import { spawn } from 'child_process';
+import { fileURLToPath } from 'url';
 import { askAI } from '../services/ai.js';
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const pdf = require('pdf-parse');
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // In-Memory Fallback Store if PostgreSQL is offline/inaccessible
 const inMemoryChats = {};
@@ -1229,77 +1234,68 @@ const getBrainValue = async (key, defaultValue) => {
   return defaultValue;
 };
 
+// Helper: Spawn Python script for AI query processing
+const executePythonQueryProcessor = (payload) => {
+  return new Promise((resolve, reject) => {
+    const scriptPath = path.join(__dirname, '..', 'services', 'queryProcessor.py');
+    const pythonProcess = spawn('python', [scriptPath]);
 
+    let outputData = '';
+    let errorData = '';
+
+    pythonProcess.stdout.on('data', (data) => {
+      outputData += data.toString();
+    });
+
+    pythonProcess.stderr.on('data', (data) => {
+      errorData += data.toString();
+    });
+
+    pythonProcess.on('error', (err) => {
+      console.error('Failed to spawn Python process:', err);
+      reject(err);
+    });
+
+    pythonProcess.on('close', (code) => {
+      if (code !== 0) {
+        console.error(`Python script exited with code ${code}. Error: ${errorData}`);
+        return reject(new Error(errorData || `Python script exited with code ${code}`));
+      }
+      try {
+        const result = JSON.parse(outputData.trim());
+        resolve(result.reply || '');
+      } catch (err) {
+        console.error('Failed to parse Python output:', outputData);
+        reject(err);
+      }
+    });
+
+    pythonProcess.stdin.write(JSON.stringify(payload));
+    pythonProcess.stdin.end();
+  });
+};
 
 // Helper: Run internal C-Suite consultation for specific executive
 const consultExecutive = async (execId, systemPrompt, userText, openRouterKey, openAIKey) => {
-  // If key is Gemini Key, route to Google AI Studio
-  const isGemini = openRouterKey && (openRouterKey.startsWith('AIzaSy') || openRouterKey.startsWith('AQ.'));
+  const hasKey = openRouterKey || openAIKey;
 
-  if (isGemini) {
+  if (hasKey) {
     try {
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${openRouterKey}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          systemInstruction: { parts: [{ text: systemPrompt }] },
-          contents: [{ role: 'user', parts: [{ text: `Analyze the following Founder inquiry and provide a professional, departmental assessment: "${userText}"` }] }]
-        })
+      const reply = await executePythonQueryProcessor({
+        openRouterKey,
+        openAIKey,
+        text: userText,
+        history: [{
+          role: 'user',
+          content: `Analyze the following Founder inquiry and provide a professional, departmental assessment: "${userText}"`
+        }],
+        companyContext: systemPrompt
       });
-      if (response.ok) {
-        const data = await response.json();
-        return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+      if (reply) {
+        return reply;
       }
     } catch (err) {
-      console.error(`Gemini consultation failed for ${execId}`, err);
-    }
-  } else if (openRouterKey) {
-    try {
-      const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${openRouterKey}`,
-          'Content-Type': 'application/json',
-          'HTTP-Referer': 'https://visuark.os',
-          'X-Title': 'Visuark OS'
-        },
-        body: JSON.stringify({
-          model: 'google/gemini-2.5-flash',
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: `Analyze the following Founder inquiry and provide a professional, departmental assessment: "${userText}"` }
-          ]
-        })
-      });
-      if (response.ok) {
-        const data = await response.json();
-        return data.choices?.[0]?.message?.content || '';
-      }
-    } catch (err) {
-      console.error(`Consultation failed for ${execId}`, err);
-    }
-  } else if (openAIKey) {
-    try {
-      const response = await fetch('https://api.openai.com/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${openAIKey}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          model: 'gpt-4o-mini',
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: `Analyze the following Founder inquiry and provide a professional, departmental assessment: "${userText}"` }
-          ]
-        })
-      });
-      if (response.ok) {
-        const data = await response.json();
-        return data.choices?.[0]?.message?.content || '';
-      }
-    } catch (err) {
-      console.error(`Consultation failed for ${execId}`, err);
+      console.error(`Python consultation failed for ${execId}`, err);
     }
   }
 
@@ -1541,6 +1537,136 @@ ${otherUpdates.join('\n')}
   return `Directive processed: "${text}". Strategy parameters synchronized.`;
 };
 
+const rolesConfig = [
+  { key: 'ceo', names: ['ceo', 'aria'] },
+  { key: 'cto', names: ['cto', 'byte', 'weaver'] },
+  { key: 'cfo', names: ['cfo', 'ledger', 'vance'] },
+  { key: 'cmo', names: ['cmo', 'nova', 'sparks'] },
+  { key: 'coo', names: ['coo', 'helix', 'sync'] },
+  { key: 'legal', names: ['legal', 'justice', 'code'] }
+];
+
+const detectTargetRole = (text) => {
+  const lowercase = text.toLowerCase();
+  const routeWords = ['ask', 'tell', 'query', 'forward to', 'send to', 'request'];
+
+  for (const word of routeWords) {
+    for (const r of rolesConfig) {
+      for (const name of r.names) {
+        const regex = new RegExp(`\\b${word}\\s+(?:to\\s+)?(?:the\\s+)?${name}\\b`, 'i');
+        if (regex.test(lowercase)) {
+          return r.key;
+        }
+      }
+    }
+  }
+
+  for (const r of rolesConfig) {
+    for (const name of r.names) {
+      const startRegex = new RegExp(`^\\b${name}\\b\\s*[,:-]?`, 'i');
+      if (startRegex.test(lowercase)) {
+        return r.key;
+      }
+    }
+  }
+
+  return null;
+};
+
+const cleanMessageText = (text, targetRole) => {
+  let clean = text.trim();
+  const routeWords = ['ask', 'tell', 'query', 'forward to', 'send to', 'request'];
+  const r = rolesConfig.find(item => item.key === targetRole);
+  const names = r ? r.names : [];
+  
+  for (const word of routeWords) {
+    for (const name of names) {
+      const regexes = [
+        new RegExp(`^\\b${word}\\s+(?:to\\s+)?\\b(?:the\\s+)?${name}\\s+(?:to|about|for|if|that|what|how|why|when|where)?\\s*`, 'i'),
+        new RegExp(`^\\b${word}\\s+(?:to\\s+)?\\b(?:the\\s+)?${name}\\b\\s*`, 'i')
+      ];
+      for (const regex of regexes) {
+        if (regex.test(clean)) {
+          return clean.replace(regex, '').trim();
+        }
+      }
+    }
+  }
+  
+  for (const name of names) {
+    const regex = new RegExp(`^\\b${name}\\b\\s*[,:-]?\\s*`, 'i');
+    if (regex.test(clean)) {
+      clean = clean.replace(regex, '').trim();
+    }
+  }
+  
+  return clean;
+};
+
+const queryExecutiveAI = async (exec, chat, text, openRouterKey, openAIKey) => {
+  try {
+    const previousMessages = await prisma.message.findMany({
+      where: { chatId: chat.id },
+      orderBy: { createdAt: 'asc' }
+    });
+
+    const formattedHistory = previousMessages.map(msg => ({
+      role: msg.sender === 'founder' ? 'user' : 'assistant',
+      content: msg.text
+    }));
+
+    let reply = '';
+    let usedMockFallback = false;
+
+    const hasKey = openRouterKey || openAIKey;
+
+    if (hasKey) {
+      try {
+        const companyBrainContext = await getCompanyBrainContext();
+        const activeProjectsContext = await getActiveProjectsContext();
+        const companyContext = `${companyBrainContext}\n${activeProjectsContext}`;
+
+        reply = await executePythonQueryProcessor({
+          openRouterKey,
+          openAIKey,
+          text,
+          history: formattedHistory,
+          companyContext
+        });
+      } catch (err) {
+        console.error('Python query processing failed:', err);
+        usedMockFallback = true;
+      }
+    } else {
+      usedMockFallback = true;
+    }
+
+    if (usedMockFallback || !reply) {
+      const baseReply = await compileContextAwareFallback(exec.id, text);
+      reply = baseReply;
+    }
+
+    return reply;
+  } catch (err) {
+    console.error('Error generating executive AI reply:', err);
+    return await compileContextAwareFallback(exec.id, text);
+  }
+};
+
+// Helper: Check if a query is related to business operations/strategy
+const isBusinessQuery = (text) => {
+  const query = text.toLowerCase();
+  const businessKeywords = [
+    'project', 'sprint', 'runway', 'mrr', 'arr', 'pricing', 'price', 
+    'cost', 'tier', 'vision', 'mission', 'goal', 'sop', 'procedure', 
+    'rule', 'brand', 'theme', 'visual', 'tool', 'capability', 
+    'function', 'assessment', 'report', 'status', 'update', 'roundtable',
+    'csuite', 'c-suite', 'consult', 'board', 'strategy', 'operations', 
+    'marketing', 'finance', 'compliance', 'legal', 'schedules', 'backlog'
+  ];
+  return businessKeywords.some(keyword => query.includes(keyword));
+};
+
 // Send Message, query OpenAI/OpenRouter/Gemini, and store history
 export const sendMessage = async (req, res) => {
   const { executiveId } = req.params;
@@ -1605,6 +1731,81 @@ export const sendMessage = async (req, res) => {
       }
     });
 
+    // Intercept cross-executive routing delegation (e.g. "ask cfo ...")
+    const targetRole = detectTargetRole(text);
+    if (targetRole && targetRole.toLowerCase() !== executiveId.toLowerCase()) {
+      const cleanText = cleanMessageText(text, targetRole);
+      
+      // Fetch target executive details
+      const targetExec = await prisma.executive.findUnique({ where: { id: targetRole } });
+      if (targetExec) {
+        // Fetch/create target chat room
+        let targetChat = await prisma.chat.findUnique({
+          where: {
+            founderId_executiveId: {
+              founderId: founder.id,
+              executiveId: targetRole
+            }
+          }
+        });
+        if (!targetChat) {
+          targetChat = await prisma.chat.create({
+            data: {
+              founderId: founder.id,
+              executiveId: targetRole
+            }
+          });
+        }
+
+        // Save delegated user message in target chat room
+        await prisma.message.create({
+          data: {
+            chatId: targetChat.id,
+            sender: 'founder',
+            text: cleanText || text,
+            timestamp: currentTime
+          }
+        });
+
+        // Generate target AI response (utilizing target role contexts)
+        const targetReply = await queryExecutiveAI(targetExec, targetChat, cleanText || text, openRouterKey, openAIKey);
+
+        // Save target response in target chat room
+        const targetReplyMsg = await prisma.message.create({
+          data: {
+            chatId: targetChat.id,
+            sender: 'executive',
+            text: targetReply,
+            timestamp: currentTime
+          }
+        });
+
+        // Current executive replies back confirming the redirection & showing response inline
+        const currentReplyText = `I have forwarded your request to **${targetExec.name} (${targetRole.toUpperCase()})**.\n\nHere is their response:\n${targetReply}`;
+        const execMsg = await prisma.message.create({
+          data: {
+            chatId: chat.id,
+            sender: 'executive',
+            text: currentReplyText,
+            timestamp: currentTime
+          }
+        });
+
+        // Scan both chats for potential assignments
+        try {
+          await scanAndProcessAssignments(cleanText || text, 'Founder', targetRole);
+          await scanAndProcessAssignments(targetReply, targetExec.name, targetRole);
+        } catch (e) {
+          console.error('Failed to process assignments for routed flow:', e);
+        }
+
+        return res.json({
+          userMessage: userMsg,
+          executiveMessage: execMsg
+        });
+      }
+    }
+
     // Scan founder message for assignments
     try {
       await scanAndProcessAssignments(text, 'Founder', exec.id);
@@ -1636,7 +1837,8 @@ export const sendMessage = async (req, res) => {
 
     // 4. CEO Roundtable consultation
     let csuiteBriefing = "";
-    if (exec.id === 'ceo') {
+    const isBizQuery = isBusinessQuery(text);
+    if (exec.id === 'ceo' && isBizQuery) {
       const execsToConsult = ['cto', 'cfo', 'cmo', 'coo', 'legal'];
       
       const consultations = await Promise.all(
@@ -1660,92 +1862,24 @@ export const sendMessage = async (req, res) => {
     let reply = '';
     let usedMockFallback = false;
 
-    // Detect Google Gemini API Key
-    const isGeminiKey = openRouterKey && (openRouterKey.startsWith('AIzaSy') || openRouterKey.startsWith('AQ.'));
+    const hasKey = openRouterKey || openAIKey;
 
-    if (isGeminiKey) {
+    if (hasKey) {
       try {
-        const geminiHistory = formattedHistory.map(msg => ({
-          role: msg.role === 'user' ? 'user' : 'model',
-          parts: [{ text: msg.content }]
-        }));
-
-        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${openRouterKey}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            systemInstruction: { parts: [{ text: finalSystemPrompt }] },
-            contents: geminiHistory
-          })
-        });
-
-        if (response.ok) {
-          const data = await response.json();
-          reply = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-        } else {
-          console.error(`Gemini API Error status: ${response.status}`);
-          usedMockFallback = true;
+        let companyContext = `${companyBrainContext}\n${activeProjectsContext}`;
+        if (exec.id === 'ceo' && isBizQuery) {
+          companyContext += `\n\n${csuiteBriefing}\n\nAs the CEO, you have consulted your C-Suite team above. Synthesize their assessments and formulate a single, unified final recommendation. The Founder must only see your final recommendation.`;
         }
-      } catch (err) {
-        console.error('Gemini API call failed', err);
-        usedMockFallback = true;
-      }
-    } else if (openRouterKey) {
-      try {
-        const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${openRouterKey}`,
-            'Content-Type': 'application/json',
-            'HTTP-Referer': 'https://os.os',
-            'X-Title': 'OS'
-          },
-          body: JSON.stringify({
-            model: 'google/gemini-2.5-flash',
-            messages: [
-              { role: 'system', content: finalSystemPrompt },
-              ...formattedHistory
-            ]
-          })
-        });
 
-        if (response.ok) {
-          const data = await response.json();
-          reply = data.choices?.[0]?.message?.content || '';
-        } else {
-          console.error(`OpenRouter error: ${response.status}`);
-          usedMockFallback = true;
-        }
-      } catch (err) {
-        console.error('OpenRouter call failed', err);
-        usedMockFallback = true;
-      }
-    } else if (openAIKey) {
-      try {
-        const response = await fetch('https://api.openai.com/v1/chat/completions', {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${openAIKey}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            model: 'gpt-4o-mini',
-            messages: [
-              { role: 'system', content: finalSystemPrompt },
-              ...formattedHistory
-            ]
-          })
+        reply = await executePythonQueryProcessor({
+          openRouterKey,
+          openAIKey,
+          text,
+          history: formattedHistory,
+          companyContext
         });
-
-        if (response.ok) {
-          const data = await response.json();
-          reply = data.choices?.[0]?.message?.content || '';
-        } else {
-          console.error(`OpenAI error: ${response.status}`);
-          usedMockFallback = true;
-        }
       } catch (err) {
-        console.error('OpenAI call failed', err);
+        console.error('Python query processing failed in sendMessage:', err);
         usedMockFallback = true;
       }
     } else {
@@ -1813,6 +1947,55 @@ export const sendMessage = async (req, res) => {
     }
     inMemoryChats[executiveId].push(userMsg);
 
+    // Intercept in-memory cross-role delegation
+    const targetRole = detectTargetRole(text);
+    if (targetRole && targetRole.toLowerCase() !== executiveId.toLowerCase()) {
+      const cleanText = cleanMessageText(text, targetRole);
+      const targetName = assigneeMap[targetRole]?.name || targetRole.toUpperCase();
+      
+      // Save delegated user message in target fallback chat
+      if (!inMemoryChats[targetRole]) {
+        inMemoryChats[targetRole] = [
+          {
+            id: `greet-${targetRole}`,
+            sender: 'executive',
+            text: getGreetingText(targetRole),
+            timestamp: '09:00 AM'
+          }
+        ];
+      }
+      inMemoryChats[targetRole].push({
+        id: `user-${Date.now()}`,
+        sender: 'founder',
+        text: cleanText || text,
+        timestamp: currentTime
+      });
+
+      // Generate target fallback response
+      const targetReply = await compileContextAwareFallback(targetRole, cleanText || text);
+      inMemoryChats[targetRole].push({
+        id: `reply-${Date.now()}`,
+        sender: 'executive',
+        text: targetReply,
+        timestamp: currentTime
+      });
+
+      // Current executive confirms redirect and returns inline reply
+      const currentReplyText = `I have forwarded your request to **${targetName} (${targetRole.toUpperCase()})**.\n\nHere is their response:\n${targetReply}`;
+      const execMsg = {
+        id: `exec-${Date.now()}`,
+        sender: 'executive',
+        text: currentReplyText,
+        timestamp: currentTime
+      };
+      inMemoryChats[executiveId].push(execMsg);
+
+      return res.json({
+        userMessage: userMsg,
+        executiveMessage: execMsg
+      });
+    }
+
     // Scan founder message for assignments
     try {
       await scanAndProcessAssignments(text, 'Founder', executiveId);
@@ -1829,12 +2012,10 @@ export const sendMessage = async (req, res) => {
     let reply = '';
     const companyBrainContext = await getCompanyBrainContext();
     const activeProjectsContext = await getActiveProjectsContext();
-    let finalPrompt = getGreetingText(executiveId) + companyBrainContext + activeProjectsContext;
+    let companyContext = getGreetingText(executiveId) + companyBrainContext + activeProjectsContext;
+    const isBizQuery = isBusinessQuery(text);
 
-    // Detect Google Gemini API Key in fallback route
-    const isGeminiKey = openRouterKey && (openRouterKey.startsWith('AIzaSy') || openRouterKey.startsWith('AQ.'));
-
-    if (executiveId === 'ceo') {
+    if (executiveId === 'ceo' && isBizQuery) {
       const ctoAssess = "Engineering is stable. Repositories compiled. GKE cluster cost optimized.";
       const cfoAssess = "Runway is projected at 18.4 months. Financial ledgers locked.";
       const cmoAssess = "Campaign click ratios CTR are at 4.8%. Search traffic steady.";
@@ -1850,87 +2031,27 @@ export const sendMessage = async (req, res) => {
 - LEGAL (Compliance) Assessment: ${legalAssess}
       `;
 
-      finalPrompt = `${finalPrompt}\n\n${consultLogs}\n\nAs the CEO, synthesize C-Suite assessments. Founder sees final recommendation.`;
+      companyContext = `${companyContext}\n\n${consultLogs}\n\nAs the CEO, synthesize C-Suite assessments. Founder sees final recommendation.`;
     }
 
-    if (isGeminiKey) {
-      try {
-        const history = inMemoryChats[executiveId].map(msg => ({
-          role: msg.sender === 'founder' ? 'user' : 'model',
-          parts: [{ text: msg.text }]
-        }));
+    const hasKey = openRouterKey || openAIKey;
 
-        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${openRouterKey}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            systemInstruction: { parts: [{ text: finalPrompt }] },
-            contents: history
-          })
-        });
-
-        if (response.ok) {
-          const data = await response.json();
-          reply = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-        }
-      } catch (err) {
-        console.error('In-memory Gemini API call failed', err);
-      }
-    } else if (openRouterKey) {
+    if (hasKey) {
       try {
         const history = inMemoryChats[executiveId].map(msg => ({
           role: msg.sender === 'founder' ? 'user' : 'assistant',
           content: msg.text
         }));
-        const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${openRouterKey}`,
-            'Content-Type': 'application/json',
-            'HTTP-Referer': 'https://os.os',
-            'X-Title': 'OS'
-          },
-          body: JSON.stringify({
-            model: 'google/gemini-2.5-flash',
-            messages: [
-              { role: 'system', content: finalPrompt },
-              ...history
-            ]
-          })
+
+        reply = await executePythonQueryProcessor({
+          openRouterKey,
+          openAIKey,
+          text,
+          history,
+          companyContext
         });
-        if (response.ok) {
-          const data = await response.json();
-          reply = data.choices?.[0]?.message?.content || '';
-        }
       } catch (err) {
-        console.error('In-memory OpenRouter call failed', err);
-      }
-    } else if (openAIKey) {
-      try {
-        const history = inMemoryChats[executiveId].map(msg => ({
-          role: msg.sender === 'founder' ? 'user' : 'assistant',
-          content: msg.text
-        }));
-        const response = await fetch('https://api.openai.com/v1/chat/completions', {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${openAIKey}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            model: 'gpt-4o-mini',
-            messages: [
-              { role: 'system', content: finalPrompt },
-              ...history
-            ]
-          })
-        });
-        if (response.ok) {
-          const data = await response.json();
-          reply = data.choices?.[0]?.message?.content || '';
-        }
-      } catch (err) {
-        console.error('In-memory OpenAI call failed', err);
+        console.error('In-memory Python query processing failed:', err);
       }
     }
 
