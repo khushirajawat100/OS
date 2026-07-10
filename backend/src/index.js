@@ -21,3 +21,5 @@ app.use('/api', apiRouter);
 app.listen(PORT, () => {
   console.log(`OS Express backend active on port ${PORT}`);
 });
+
+export default app;

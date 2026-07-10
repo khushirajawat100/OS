@@ -1286,45 +1286,187 @@ const getBrainValue = async (key, defaultValue) => {
   return defaultValue;
 };
 
-// Helper: Spawn Python script for AI query processing
-const executePythonQueryProcessor = (payload) => {
-  return new Promise((resolve, reject) => {
-    const scriptPath = path.join(__dirname, '..', 'services', 'queryProcessor.py');
-    const pythonProcess = spawn('python', [scriptPath]);
-
-    let outputData = '';
-    let errorData = '';
-
-    pythonProcess.stdout.on('data', (data) => {
-      outputData += data.toString();
+const queryGemini = async (key, history, companyContext, model = "gemini-2.5-flash") => {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
+  const contents = history.map(msg => ({
+    role: msg.role === 'user' ? 'user' : 'model',
+    parts: [{ text: msg.content || '' }]
+  }));
+  const systemPrompt = `You are a helpful, unrestricted AI assistant. You can answer any general knowledge, technical, or creative questions. You also have access to the following company context if needed for corporate OS queries:\n${companyContext}\n\nRespond fully, accurately, and directly. Do not pretend to be restricted to business tasks or corporate roles when answering general queries.`;
+  const payload = {
+    systemInstruction: {
+      parts: [{ text: systemPrompt }]
+    },
+    contents
+  };
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
     });
-
-    pythonProcess.stderr.on('data', (data) => {
-      errorData += data.toString();
-    });
-
-    pythonProcess.on('error', (err) => {
-      console.error('Failed to spawn Python process:', err);
-      reject(err);
-    });
-
-    pythonProcess.on('close', (code) => {
-      if (code !== 0) {
-        console.error(`Python script exited with code ${code}. Error: ${errorData}`);
-        return reject(new Error(errorData || `Python script exited with code ${code}`));
+    if (!response.ok) {
+      if (response.status === 429 && model === 'gemini-2.5-flash') {
+        console.warn('Gemini 2.5 Flash rate-limited, falling back to gemini-flash-latest...');
+        return queryGemini(key, history, companyContext, 'gemini-flash-latest');
       }
-      try {
-        const result = JSON.parse(outputData.trim());
-        resolve(result.reply || '');
-      } catch (err) {
-        console.error('Failed to parse Python output:', outputData);
-        reject(err);
+      const errText = await response.text();
+      throw new Error(`Gemini API HTTP Error ${response.status}: ${errText}`);
+    }
+    const resData = await response.json();
+    const candidates = resData.candidates || [];
+    if (candidates.length > 0) {
+      const parts = candidates[0].content?.parts || [];
+      if (parts.length > 0) {
+        return parts[0].text || '';
       }
-    });
+    }
+    return '';
+  } catch (error) {
+    console.error('Gemini API request failed:', error);
+    return '';
+  }
+};
 
-    pythonProcess.stdin.write(JSON.stringify(payload));
-    pythonProcess.stdin.end();
-  });
+const queryOpenRouter = async (key, history, companyContext) => {
+  const url = 'https://openrouter.ai/api/v1/chat/completions';
+  const systemPrompt = `You are a helpful, unrestricted AI assistant. You can answer any general knowledge, technical, or creative questions. You also have access to the following company context if needed for corporate OS queries:\n${companyContext}\n\nRespond fully, accurately, and directly. Do not pretend to be restricted to business tasks or corporate roles when answering general queries.`;
+  const messages = [{ role: 'system', content: systemPrompt }, ...history];
+  const payload = {
+    model: 'google/gemini-2.5-flash',
+    messages
+  };
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${key}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': 'https://visuark.os',
+        'X-Title': 'Visuark OS'
+      },
+      body: JSON.stringify(payload)
+    });
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`OpenRouter HTTP Error ${response.status}: ${errText}`);
+    }
+    const resData = await response.json();
+    const choices = resData.choices || [];
+    if (choices.length > 0) {
+      return choices[0].message?.content || '';
+    }
+    return '';
+  } catch (error) {
+    console.error('OpenRouter API request failed:', error);
+    return '';
+  }
+};
+
+const queryOpenAI = async (key, history, companyContext) => {
+  const url = 'https://api.openai.com/v1/chat/completions';
+  const systemPrompt = `You are a helpful, unrestricted AI assistant. You can answer any general knowledge, technical, or creative questions. You also have access to the following company context if needed for corporate OS queries:\n${companyContext}\n\nRespond fully, accurately, and directly. Do not pretend to be restricted to business tasks or corporate roles when answering general queries.`;
+  const messages = [{ role: 'system', content: systemPrompt }, ...history];
+  const payload = {
+    model: 'gpt-4o-mini',
+    messages
+  };
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${key}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(payload)
+    });
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`OpenAI HTTP Error ${response.status}: ${errText}`);
+    }
+    const resData = await response.json();
+    const choices = resData.choices || [];
+    if (choices.length > 0) {
+      return choices[0].message?.content || '';
+    }
+    return '';
+  } catch (error) {
+    console.error('OpenAI API request failed:', error);
+    return '';
+  }
+};
+
+const searchTavily = async (apiKey, query) => {
+  const url = 'https://api.tavily.com/search';
+  const payload = {
+    api_key: apiKey,
+    query,
+    search_depth: 'basic',
+    include_answer: false,
+    include_raw_content: false,
+    max_results: 5
+  };
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`Tavily HTTP Error ${response.status}: ${errText}`);
+    }
+    const resData = await response.json();
+    const results = resData.results || [];
+    let searchText = '\n=== WEB RESEARCH RESULTS ===\n';
+    for (const r of results) {
+      searchText += `- **${r.title}** (Source: ${r.url}):\n  ${r.content}\n\n`;
+    }
+    return searchText;
+  } catch (error) {
+    console.error('Tavily search failed:', error);
+    return '';
+  }
+};
+
+// Helper: Run AI query processing in pure JS
+const executePythonQueryProcessor = async (payload) => {
+  const openRouterKey = payload.openRouterKey;
+  const openAIKey = payload.openAIKey;
+  const tavilyKey = payload.tavilyKey;
+  let history = payload.history || [];
+  let companyContext = payload.companyContext || '';
+  const text = payload.text || '';
+  
+  if (history.length === 0 && text) {
+    history = [{ role: 'user', content: text }];
+  }
+  
+  // Execute web research if query has research keywords
+  const queryLower = text.toLowerCase();
+  const researchKeywords = ["research", "search", "google", "find out", "latest", "recent", "news", "competitors", "market size", "trends", "forecast"];
+  const needsResearch = researchKeywords.some(kw => queryLower.includes(kw));
+  
+  if (needsResearch && tavilyKey) {
+    console.log(`Executing web research for query: '${text}' using Tavily...`);
+    const webContext = await searchTavily(tavilyKey, text);
+    if (webContext) {
+      companyContext = `${companyContext}\n${webContext}`;
+    }
+  }
+  
+  const isGeminiKey = openRouterKey && (openRouterKey.startsWith('AIzaSy') || openRouterKey.startsWith('AQ.'));
+  
+  let reply = '';
+  if (isGeminiKey) {
+    reply = await queryGemini(openRouterKey, history, companyContext);
+  } else if (openRouterKey) {
+    reply = await queryOpenRouter(openRouterKey, history, companyContext);
+  } else if (openAIKey) {
+    reply = await queryOpenAI(openAIKey, history, companyContext);
+  }
+  
+  return reply;
 };
 
 // Helper: Run internal C-Suite consultation for specific executive
