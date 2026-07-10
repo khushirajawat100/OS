@@ -1,10 +1,19 @@
 import { createRequire } from 'module';
 import PDFDocument from 'pdfkit';
 
+// Polyfills for browser APIs required by pdf-parse on Vercel Node.js environment
+if (typeof globalThis.DOMMatrix === 'undefined') {
+  globalThis.DOMMatrix = class DOMMatrix {};
+}
+if (typeof globalThis.ImageData === 'undefined') {
+  globalThis.ImageData = class ImageData {};
+}
+if (typeof globalThis.Path2D === 'undefined') {
+  globalThis.Path2D = class Path2D {};
+}
+
 const require = createRequire(import.meta.url);
 const pdf = require('pdf-parse');
-
-const { PDFParse } = pdf;
 
 /**
  * Extract text and metadata from a PDF buffer.
@@ -13,14 +22,12 @@ const { PDFParse } = pdf;
  */
 export async function extractText(buffer) {
   try {
-    const parser = new PDFParse({ data: buffer });
-    const textResult = await parser.getText();
-    const infoResult = await parser.getInfo();
+    const textResult = await pdf(buffer);
     return {
       text: textResult.text || '',
-      numpages: textResult.total || 1,
-      info: infoResult.info || {},
-      metadata: infoResult.metadata || null
+      numpages: textResult.numpages || 1,
+      info: textResult.info || {},
+      metadata: textResult.metadata || null
     };
   } catch (error) {
     console.error('[pdfService] Error extracting text from PDF:', error);
