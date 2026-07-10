@@ -5,9 +5,8 @@ import path from 'path';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { askAI } from '../services/ai.js';
-import { createRequire } from 'module';
-const require = createRequire(import.meta.url);
-const pdf = require('pdf-parse');
+import { extractText } from '../services/pdfService.js';
+
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1222,6 +1221,59 @@ const getActiveProjectsContext = async () => {
   return "\n\n=== ACTIVE SPRINT BOARD PROJECTS (KANBAN) ===\nNo active projects on the sprint board.";
 };
 
+const getReportsContext = async () => {
+  try {
+    let reports = [];
+    try {
+      reports = await prisma.report.findMany();
+    } catch (e) {
+      // Ignore database connection issues for fallback list
+    }
+    
+    let fallbackReportsList = [];
+    try {
+      const reportController = await import('./reportController.js');
+      fallbackReportsList = reportController.fallbackReports || [];
+    } catch (e) {
+      // ignore
+    }
+    
+    const allReports = [...reports, ...fallbackReportsList];
+    if (allReports.length > 0) {
+      let context = "\n\n=== COMPILED BOARDROOM REPORTS ===\n";
+      for (const report of allReports) {
+        context += `- Name: ${report.name} | Size: ${report.size} | Author: ${report.author} | Type: ${report.type} | Compiled: ${report.compiled || report.createdAt}\n`;
+      }
+      return context;
+    }
+  } catch (err) {
+    console.warn("Could not fetch reports for context:", err);
+  }
+  return "\n\n=== COMPILED BOARDROOM REPORTS ===\nNo reports compiled yet.";
+};
+
+const getCalendarContext = async () => {
+  try {
+    const dataDir = path.join(process.cwd(), 'src', 'data');
+    const filePath = path.join(dataDir, 'calendar.json');
+    if (fs.existsSync(filePath)) {
+      const fileContent = fs.readFileSync(filePath, 'utf-8');
+      const data = JSON.parse(fileContent);
+      const events = data.events || [];
+      if (events.length > 0) {
+        let context = "\n\n=== COMPANY CALENDAR REMINDERS & EVENTS ===\n";
+        for (const ev of events) {
+          context += `- Day: ${ev.day} | Time: ${ev.time} | Dept: ${ev.lead} | Event: ${ev.text}\n`;
+        }
+        return context;
+      }
+    }
+  } catch (err) {
+    console.warn("Could not fetch calendar for context:", err);
+  }
+  return "\n\n=== COMPANY CALENDAR REMINDERS & EVENTS ===\nNo events scheduled.";
+};
+
 const getBrainValue = async (key, defaultValue) => {
   try {
     const entry = await prisma.companyBrain.findUnique({
@@ -1284,6 +1336,7 @@ const consultExecutive = async (execId, systemPrompt, userText, openRouterKey, o
       const reply = await executePythonQueryProcessor({
         openRouterKey,
         openAIKey,
+        tavilyKey: process.env.TAVILY_API_KEY,
         text: userText,
         history: [{
           role: 'user',
@@ -1624,11 +1677,14 @@ const queryExecutiveAI = async (exec, chat, text, openRouterKey, openAIKey) => {
       try {
         const companyBrainContext = await getCompanyBrainContext();
         const activeProjectsContext = await getActiveProjectsContext();
-        const companyContext = `${companyBrainContext}\n${activeProjectsContext}`;
+        const reportsContext = await getReportsContext();
+        const calendarContext = await getCalendarContext();
+        const companyContext = `${companyBrainContext}\n${activeProjectsContext}\n${reportsContext}\n${calendarContext}`;
 
         reply = await executePythonQueryProcessor({
           openRouterKey,
           openAIKey,
+          tavilyKey: process.env.TAVILY_API_KEY,
           text,
           history: formattedHistory,
           companyContext
@@ -1866,7 +1922,9 @@ export const sendMessage = async (req, res) => {
 
     if (hasKey) {
       try {
-        let companyContext = `${companyBrainContext}\n${activeProjectsContext}`;
+        const reportsContext = await getReportsContext();
+        const calendarContext = await getCalendarContext();
+        let companyContext = `${companyBrainContext}\n${activeProjectsContext}\n${reportsContext}\n${calendarContext}`;
         if (exec.id === 'ceo' && isBizQuery) {
           companyContext += `\n\n${csuiteBriefing}\n\nAs the CEO, you have consulted your C-Suite team above. Synthesize their assessments and formulate a single, unified final recommendation. The Founder must only see your final recommendation.`;
         }
@@ -1874,6 +1932,7 @@ export const sendMessage = async (req, res) => {
         reply = await executePythonQueryProcessor({
           openRouterKey,
           openAIKey,
+          tavilyKey: process.env.TAVILY_API_KEY,
           text,
           history: formattedHistory,
           companyContext
@@ -2012,7 +2071,9 @@ export const sendMessage = async (req, res) => {
     let reply = '';
     const companyBrainContext = await getCompanyBrainContext();
     const activeProjectsContext = await getActiveProjectsContext();
-    let companyContext = getGreetingText(executiveId) + companyBrainContext + activeProjectsContext;
+    const reportsContext = await getReportsContext();
+    const calendarContext = await getCalendarContext();
+    let companyContext = getGreetingText(executiveId) + companyBrainContext + activeProjectsContext + reportsContext + calendarContext;
     const isBizQuery = isBusinessQuery(text);
 
     if (executiveId === 'ceo' && isBizQuery) {
@@ -2046,6 +2107,7 @@ export const sendMessage = async (req, res) => {
         reply = await executePythonQueryProcessor({
           openRouterKey,
           openAIKey,
+          tavilyKey: process.env.TAVILY_API_KEY,
           text,
           history,
           companyContext
@@ -2137,13 +2199,36 @@ export const clearChatHistory = async (req, res) => {
 
 export const uploadDocument = async (req, res) => {
   const { executiveId } = req.params;
-  const { fileName, fileSize, fileType, fileContent } = req.body;
+  
+  let nameOfFile;
+  let sizeOfFile;
+  let typeOfFile;
+  let bufferOfFile;
 
-  if (!fileName || !fileContent) {
-    return res.status(400).json({ error: 'File name and content are required' });
+  // Check if it is a multipart file upload or JSON body base64
+  if (req.files && (req.files.file || Object.keys(req.files).length > 0)) {
+    const uploadedFile = req.files.file || req.files[Object.keys(req.files)[0]];
+    nameOfFile = uploadedFile.name;
+    sizeOfFile = `${(uploadedFile.size / (1024 * 1024)).toFixed(2)} MB`;
+    typeOfFile = uploadedFile.mimetype;
+    bufferOfFile = uploadedFile.data;
+  } else {
+    const { fileName, fileSize, fileType, fileContent } = req.body;
+    if (!fileName || !fileContent) {
+      return res.status(400).json({ error: 'File name and content are required' });
+    }
+    nameOfFile = fileName;
+    sizeOfFile = fileSize || '1.0 MB';
+    typeOfFile = fileType || 'text/plain';
+    
+    try {
+      const base64Data = fileContent.replace(/^data:[^;]+;base64,/, "");
+      bufferOfFile = Buffer.from(base64Data, 'base64');
+    } catch (err) {
+      return res.status(400).json({ error: 'Invalid base64 file content' });
+    }
   }
 
-  let fileBuffer;
   let uploadsDir;
   let safeName;
   let filePath;
@@ -2155,40 +2240,64 @@ export const uploadDocument = async (req, res) => {
       fs.mkdirSync(uploadsDir, { recursive: true });
     }
     
-    safeName = fileName.replace(/[^a-zA-Z0-9_.-]/g, '');
+    safeName = nameOfFile.replace(/[^a-zA-Z0-9_.-]/g, '');
     filePath = path.join(uploadsDir, safeName);
     
-    const base64Data = fileContent.replace(/^data:[^;]+;base64,/, "");
-    fileBuffer = Buffer.from(base64Data, 'base64');
-    
-    await fs.promises.writeFile(filePath, fileBuffer);
+    await fs.promises.writeFile(filePath, bufferOfFile);
     console.log(`[File Upload] Successfully saved file: ${filePath}`);
   } catch (fsErr) {
     console.error("[File Upload] Failed to write file to disk:", fsErr);
   }
 
-  // Parse PDF content using pdf-parse and summarize it using askAI
+  // Parse and evaluate content using pdfService (if PDF) or text decoder (if other text file)
   let parsedDetailsText = "";
-  if (fileName.toLowerCase().endsWith('.pdf') && fileBuffer) {
+  const isPdf = nameOfFile.toLowerCase().endsWith('.pdf');
+  const isTextFile = nameOfFile.toLowerCase().endsWith('.txt') ||
+                     nameOfFile.toLowerCase().endsWith('.md') ||
+                     nameOfFile.toLowerCase().endsWith('.json') ||
+                     nameOfFile.toLowerCase().endsWith('.csv') ||
+                     typeOfFile.startsWith('text/') ||
+                     typeOfFile === 'application/json';
+
+  if (bufferOfFile && (isPdf || isTextFile)) {
     try {
-      const parsedData = await pdf(fileBuffer);
-      if (parsedData && parsedData.text) {
-        const words = parsedData.text.trim().split(/\s+/).filter(Boolean);
+      let extractedTextContent = "";
+      if (isPdf) {
+        console.log(`[PDF Extraction] Parsing PDF using pdfService...`);
+        const parsedData = await extractText(bufferOfFile);
+        extractedTextContent = parsedData.text || "";
+      } else {
+        console.log(`[Text Extraction] Extracting text content from ${nameOfFile}...`);
+        extractedTextContent = bufferOfFile.toString('utf8');
+      }
+
+      if (extractedTextContent.trim()) {
+        const words = extractedTextContent.trim().split(/\s+/).filter(Boolean);
         const wordCount = words.length;
         
-        console.log(`[PDF Summary] Summarizing PDF (${parsedData.numpages || 1} pages, ~${wordCount} words) via askAI...`);
+        console.log(`[Executive Brain] Evaluating document text (~${wordCount} words) via askAI...`);
         const messages = [
           {
             role: "user",
-            content: `Summarize the following document content in a professional, structured boardroom executive format. Keep the summary under 200 words, highlighting key findings, metrics, and actionable items:\n\n${parsedData.text}`
+            content: `You are the Executive C-Suite Brain. Analyze and evaluate the following document context:
+   
+Document Name: ${nameOfFile}
+Document Content:
+${extractedTextContent.substring(0, 8000)} ${extractedTextContent.length > 8000 ? '\n[Content Truncated for Length]...' : ''}
+
+Please perform a thorough professional boardroom evaluation. Structure your response with:
+1. **Executive Brief**: A concise summary of the document (under 150 words).
+2. **Critical Metrics & Key Findings**: Highlight the key numbers, status indicators, or data findings.
+3. **Strategic Recommendations**: Provide 2-3 actionable next steps or recommendations based on this document.
+4. **C-Suite Alignment**: Briefly explain how this matches or impacts company operations.`
           }
         ];
-        const summary = await askAI(messages);
-        parsedDetailsText = `\n\n### 📝 Executive Document Summary\n${summary}`;
+        const evaluation = await askAI(messages);
+        parsedDetailsText = `\n\n### 🧠 Executive Boardroom Evaluation\n${evaluation}`;
       }
     } catch (parseErr) {
-      console.error("[PDF Parse / askAI] Failed to extract or summarize PDF:", parseErr);
-      parsedDetailsText = `\n\n### 📝 Executive Document Summary\nError occurred while attempting to parse and summarize the PDF.`;
+      console.error("[Document Evaluation] Failed to extract or evaluate document:", parseErr);
+      parsedDetailsText = `\n\n### 🧠 Executive Boardroom Evaluation\nError occurred while attempting to parse and evaluate the document.`;
     }
   }
 
@@ -2238,22 +2347,22 @@ export const uploadDocument = async (req, res) => {
     try {
       await prisma.report.create({
         data: {
-          name: fileName,
-          size: fileSize || '1.0 MB',
+          name: nameOfFile,
+          size: sizeOfFile || '1.0 MB',
           compiled: 'Just now',
           author: 'Founder',
-          type: fileType && fileType.includes('pdf') ? 'text' : 'code'
+          type: isPdf ? 'text' : (isTextFile ? 'code' : 'text')
         }
       });
     } catch (e) {
       console.warn("Database offline during report logging, adding to in-memory fallback list.");
       const reportController = await import('./reportController.js');
       reportController.fallbackReports.push({
-        name: fileName,
-        size: fileSize || '1.0 MB',
+        name: nameOfFile,
+        size: sizeOfFile || '1.0 MB',
         compiled: 'Just now',
         author: 'Founder',
-        type: fileType && fileType.includes('pdf') ? 'text' : 'code'
+        type: isPdf ? 'text' : (isTextFile ? 'code' : 'text')
       });
     }
 
@@ -2262,13 +2371,13 @@ export const uploadDocument = async (req, res) => {
       data: {
         chatId: chat.id,
         sender: 'founder',
-        text: `📎 **Uploaded Document**: \`${fileName}\` (${fileSize || '1.0 MB'})`,
+        text: `📎 **Uploaded Document**: \`${nameOfFile}\` (${sizeOfFile || '1.0 MB'})`,
         timestamp: currentTime
       }
     });
 
     // 3. Save Executive Response
-    const executiveReplyText = `I have successfully received and parsed your document: **${fileName}** (${fileSize || '1.0 MB'}). The document has been securely archived and linked to our company records under compiled board documents.${parsedDetailsText}`;
+    const executiveReplyText = `I have successfully received and parsed your document: **${nameOfFile}** (${sizeOfFile || '1.0 MB'}). The document has been securely archived and linked to our company records under compiled board documents.${parsedDetailsText}`;
     const execMsg = await prisma.message.create({
       data: {
         chatId: chat.id,
@@ -2289,7 +2398,7 @@ export const uploadDocument = async (req, res) => {
     const userMsg = {
       id: `user-${Date.now()}`,
       sender: 'founder',
-      text: `📎 **Uploaded Document**: \`${fileName}\` (${fileSize || '1.0 MB'})`,
+      text: `📎 **Uploaded Document**: \`${nameOfFile}\` (${sizeOfFile || '1.0 MB'})`,
       timestamp: currentTime
     };
 
@@ -2306,16 +2415,20 @@ export const uploadDocument = async (req, res) => {
     inMemoryChats[executiveId].push(userMsg);
 
     // Save in-memory report fallback
-    const reportController = await import('./reportController.js');
-    reportController.fallbackReports.push({
-      name: fileName,
-      size: fileSize || '1.0 MB',
-      compiled: 'Just now',
-      author: 'Founder',
-      type: fileType && fileType.includes('pdf') ? 'text' : 'code'
-    });
+    try {
+      const reportController = await import('./reportController.js');
+      reportController.fallbackReports.push({
+        name: nameOfFile,
+        size: sizeOfFile || '1.0 MB',
+        compiled: 'Just now',
+        author: 'Founder',
+        type: isPdf ? 'text' : (isTextFile ? 'code' : 'text')
+      });
+    } catch (e) {
+      console.error(e);
+    }
 
-    const executiveReplyText = `I have successfully received and parsed your document: **${fileName}** (${fileSize || '1.0 MB'}). The document has been securely archived and linked to our company records under compiled board documents.${parsedDetailsText}`;
+    const executiveReplyText = `I have successfully received and parsed your document: **${nameOfFile}** (${sizeOfFile || '1.0 MB'}). The document has been securely archived and linked to our company records under compiled board documents.${parsedDetailsText}`;
     const execMsg = {
       id: `exec-${Date.now()}`,
       sender: 'executive',

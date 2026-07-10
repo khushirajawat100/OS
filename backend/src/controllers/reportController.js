@@ -2,9 +2,7 @@ import { prisma } from '../config/db.js';
 import fs from 'fs';
 import path from 'path';
 import PDFDocument from 'pdfkit';
-import { createRequire } from 'module';
-const require = createRequire(import.meta.url);
-const pdf = require('pdf-parse');
+import { extractText } from '../services/pdfService.js';
 
 export let fallbackReports = [
   { name: 'CFO_Q2_Financial_Audit.pdf', size: '2.4 MB', compiled: '2 hours ago', author: 'CFO', type: 'sheet' },
@@ -284,7 +282,7 @@ export const getReportContent = async (req, res) => {
     try {
       if (safeName.endsWith('.pdf')) {
         const fileBuffer = fs.readFileSync(filePath);
-        const parsed = await pdf(fileBuffer);
+        const parsed = await extractText(fileBuffer);
         return res.json({
           success: true,
           type: 'PDF Document',

@@ -152,6 +152,36 @@ def query_openai(key, history, company_context):
         sys.stderr.write(f"OpenAI API request failed: {str(e)}\n")
         return ""
 
+def search_tavily(api_key, query):
+    url = "https://api.tavily.com/search"
+    payload = {
+        "api_key": api_key,
+        "query": query,
+        "search_depth": "basic",
+        "include_answer": False,
+        "include_raw_content": False,
+        "max_results": 5
+    }
+    
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST"
+    )
+    
+    try:
+        with urllib.request.urlopen(req, timeout=10) as response:
+            res_data = json.loads(response.read().decode("utf-8"))
+            results = res_data.get("results", [])
+            search_text = "\n=== WEB RESEARCH RESULTS ===\n"
+            for r in results:
+                search_text += f"- **{r.get('title')}** (Source: {r.get('url')}):\n  {r.get('content')}\n\n"
+            return search_text
+    except Exception as e:
+        sys.stderr.write(f"Tavily search failed: {str(e)}\n")
+        return ""
+
 def main():
     try:
         input_data = json.loads(sys.stdin.read())
@@ -161,12 +191,24 @@ def main():
         
     open_router_key = input_data.get("openRouterKey")
     open_ai_key = input_data.get("openAIKey")
+    tavily_key = input_data.get("tavilyKey")
     history = input_data.get("history", [])
     company_context = input_data.get("companyContext", "")
     text = input_data.get("text", "")
     
     if not history and text:
         history = [{"role": "user", "content": text}]
+        
+    # Execute web research if query has research keywords
+    query_lower = text.lower()
+    research_keywords = ["research", "search", "google", "find out", "latest", "recent", "news", "competitors", "market size", "trends", "forecast"]
+    needs_research = any(kw in query_lower for kw in research_keywords)
+    
+    if needs_research and tavily_key:
+        sys.stderr.write(f"Executing web research for query: '{text}' using Tavily...\n")
+        web_context = search_tavily(tavily_key, text)
+        if web_context:
+            company_context = f"{company_context}\n{web_context}"
     
     is_gemini_key = open_router_key and (open_router_key.startswith("AIzaSy") or open_router_key.startswith("AQ."))
     

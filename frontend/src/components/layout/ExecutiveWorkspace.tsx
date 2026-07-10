@@ -1097,7 +1097,7 @@ export const ExecutiveWorkspace: React.FC = () => {
       return;
     }
     
-    if (fileContentMap[selectedFileName] || uploadedFilesContent[selectedFileName]) {
+    if (fileContentMap[selectedFileName] || (uploadedFilesContent[selectedFileName] && uploadedFilesContent[selectedFileName].type.startsWith('image/'))) {
       setDynamicFileContent(null);
       return;
     }
@@ -1398,7 +1398,11 @@ export const ExecutiveWorkspace: React.FC = () => {
   };
 
   const activeFile = selectedFileName 
-    ? (fileContentMap[selectedFileName] || uploadedFilesContent[selectedFileName] || dynamicFileContent) 
+    ? (
+        fileContentMap[selectedFileName] || 
+        (uploadedFilesContent[selectedFileName]?.type.startsWith('image/') ? uploadedFilesContent[selectedFileName] : null) || 
+        dynamicFileContent
+      ) 
     : null;
 
   return (
